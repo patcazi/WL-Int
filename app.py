@@ -34,6 +34,21 @@ def analyze_order(text):
     "one_sentence_summary": "One sentence summarizing the key holding"
 }}
 
+TIE-BREAKER RULES for 'motion_outcome' field:
+
+1. The 'Net Result' Rule: Do not default to 'Mixed' just because a ruling is split.
+
+2. Classify as 'Denied' (Win) if:
+   - The expert is allowed to testify on their core opinion, even if minor limitations are imposed
+   - One minor expert is struck while the main ones stay
+
+3. Classify as 'Granted' (Loss) if:
+   - The expert is struck entirely
+   - Their primary opinion (e.g., damages calculation) is excluded, leaving them with nothing useful to say
+
+4. Classify as 'Mixed' ONLY if:
+   - There are multiple distinct experts and the judge explicitly splits the baby (e.g., 'Expert A is in, Expert B is out')
+
 Document text:
 {text[:8000]}
 
@@ -89,14 +104,26 @@ def generate_judge_profile(cases_data):
 
 Write a concise, bulleted 'Judge Scouting Report' for a Partner.
 
-CRITICAL - GROUND TRUTH RULES:
-1. Source of Truth: Trust the 'Motion Outcome' field above all else.
-2. Terminology: A 'Denied' motion means the Expert was ALLOWED to testify (Win for Expert). A 'Granted' motion means the Expert was EXCLUDED (Loss for Expert).
-3. Fact Checking: When citing specific cases (e.g., Cleburne, Lowen), verify that your description of the outcome matches the 'Motion Outcome' data provided. Do not claim the judge is strict on a category if the motions were Denied.
+CRITICAL - STRICT LOGIC HIERARCHY (Use This Ordered Logic Chain):
+
+STEP 1: Check Motion Type First
+If the summary mentions 'Motion for Leave', 'Motion to Add', or 'Motion to Extend':
+  - Granted = Expert ADMITTED (Win)
+  - Denied = Expert EXCLUDED (Loss)
+
+STEP 2: Check Standard Motions (Strike/Exclude)
+If it is NOT a 'Motion for Leave':
+  - Granted = Expert EXCLUDED (Loss)
+  - Denied = Expert ADMITTED (Win)
+  - Mixed = PARTIAL Exclusion
+
+STEP 3: Final Sanity Check
+You are FORBIDDEN from describing a 'Denied' Standard Motion as an 'Exclusion'.
+You MUST describe it as the expert being allowed to testify.
 
 {summary}
 
-Provide your analysis in a clear, professional format with specific examples from the cases. Double-check all outcome interpretations before making claims."""
+Provide your analysis in a clear, professional format with specific examples from the cases. Follow the ordered logic chain above for every case before making conclusions."""
 
         response = client.chat.completions.create(
             model="gpt-4o",
