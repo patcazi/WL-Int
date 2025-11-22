@@ -24,30 +24,47 @@ client = OpenAI(api_key=api_key)
 def analyze_order(text):
     """Analyzes PDF text and extracts structured legal data."""
     try:
-        analysis_prompt = f"""Analyze this legal order/opinion and extract the following information in JSON format:
+        analysis_prompt = f"""Analyze this legal order/opinion and extract the following information in JSON format.
 
-{{
-    "case_name": "Case name or title",
-    "expert_type": "Type of expert witness (e.g., Medical, Financial, Engineering, etc.)",
-    "motion_outcome": "Granted or Denied or Mixed",
-    "legal_basis": "Reliability or Qualifications or Procedural or Relevance",
-    "one_sentence_summary": "One sentence summarizing the key holding"
-}}
+STEP 1: DETERMINE MOTION TYPE
+- OFFENSIVE: Motion to Strike, Exclude, Limit, or Summary Judgment
+- DEFENSIVE: Motion for Leave to Designate, Motion to Add, Motion to Extend Time
 
-TIE-BREAKER RULES for 'motion_outcome' field:
+STEP 2: CONVERT TO EXPERT STATUS (motion_outcome field)
+
+If Motion is OFFENSIVE:
+  - Granted → 'Expert Excluded' (Loss)
+  - Denied → 'Expert Admitted' (Win)
+
+If Motion is DEFENSIVE:
+  - Granted → 'Expert Admitted' (Win)
+  - Denied → 'Expert Excluded' (Loss)
+
+TIE-BREAKER RULES:
 
 1. The 'Net Result' Rule: Do not default to 'Mixed' just because a ruling is split.
 
-2. Classify as 'Denied' (Win) if:
+2. Classify as 'Expert Admitted' (Win) if:
    - The expert is allowed to testify on their core opinion, even if minor limitations are imposed
    - One minor expert is struck while the main ones stay
 
-3. Classify as 'Granted' (Loss) if:
+3. Classify as 'Expert Excluded' (Loss) if:
    - The expert is struck entirely
    - Their primary opinion (e.g., damages calculation) is excluded, leaving them with nothing useful to say
 
 4. Classify as 'Mixed' ONLY if:
    - There are multiple distinct experts and the judge explicitly splits the baby (e.g., 'Expert A is in, Expert B is out')
+
+JSON STRUCTURE (Extract this information):
+
+{{
+    "case_name": "Case name or title",
+    "expert_type": "Type of expert witness (e.g., Medical, Financial, Engineering, etc.)",
+    "motion_type": "Offensive or Defensive",
+    "motion_outcome": "Expert Admitted or Expert Excluded or Mixed",
+    "legal_basis": "Reliability or Qualifications or Procedural or Relevance",
+    "one_sentence_summary": "One sentence summarizing the key holding"
+}}
 
 Document text:
 {text[:8000]}
@@ -60,7 +77,7 @@ Respond ONLY with valid JSON matching the structure above. No additional text.""
                 {"role": "system", "content": "You are a legal analyst. Return only valid JSON."},
                 {"role": "user", "content": analysis_prompt}
             ],
-            temperature=0.3
+            temperature=0.0
         )
         
         result_text = response.choices[0].message.content.strip()
@@ -77,6 +94,7 @@ Respond ONLY with valid JSON matching the structure above. No additional text.""
         return {
             "case_name": "Error",
             "expert_type": "Unknown",
+            "motion_type": "Unknown",
             "motion_outcome": "Unknown",
             "legal_basis": "Unknown",
             "one_sentence_summary": f"Error analyzing: {str(e)}"
@@ -90,6 +108,7 @@ def generate_judge_profile(cases_data):
         for idx, case in enumerate(cases_data, 1):
             summary += f"{idx}. {case['case_name']}\n"
             summary += f"   Expert Type: {case['expert_type']}\n"
+            summary += f"   Motion Type: {case.get('motion_type', 'Unknown')}\n"
             summary += f"   Motion Outcome: {case['motion_outcome']}\n"
             summary += f"   Legal Basis: {case['legal_basis']}\n"
             summary += f"   Summary: {case['one_sentence_summary']}\n\n"
@@ -104,26 +123,21 @@ def generate_judge_profile(cases_data):
 
 Write a concise, bulleted 'Judge Scouting Report' for a Partner.
 
-CRITICAL - STRICT LOGIC HIERARCHY (Use This Ordered Logic Chain):
+CRITICAL - INTERPRETATION GUIDE:
 
-STEP 1: Check Motion Type First
-If the summary mentions 'Motion for Leave', 'Motion to Add', or 'Motion to Extend':
-  - Granted = Expert ADMITTED (Win)
-  - Denied = Expert EXCLUDED (Loss)
+The 'Motion Outcome' field uses standardized labels:
+  - 'Expert Admitted' = The expert was allowed to testify (WIN for the party offering the expert)
+  - 'Expert Excluded' = The expert was struck/excluded (LOSS for the party offering the expert)
+  - 'Mixed' = Split decision across multiple experts or partial exclusion
 
-STEP 2: Check Standard Motions (Strike/Exclude)
-If it is NOT a 'Motion for Leave':
-  - Granted = Expert EXCLUDED (Loss)
-  - Denied = Expert ADMITTED (Win)
-  - Mixed = PARTIAL Exclusion
-
-STEP 3: Final Sanity Check
-You are FORBIDDEN from describing a 'Denied' Standard Motion as an 'Exclusion'.
-You MUST describe it as the expert being allowed to testify.
+When analyzing patterns:
+  - Count 'Expert Admitted' outcomes as the judge being LENIENT
+  - Count 'Expert Excluded' outcomes as the judge being STRICT
+  - Look for patterns by Expert Type, Legal Basis, and overall tendencies
 
 {summary}
 
-Provide your analysis in a clear, professional format with specific examples from the cases. Follow the ordered logic chain above for every case before making conclusions."""
+Provide your analysis in a clear, professional format with specific examples from the cases. Focus on identifying which types of experts and which legal challenges this judge is most likely to accept or reject."""
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -248,7 +262,7 @@ if st.session_state["analyzed_cases"]:
     df = pd.DataFrame(st.session_state["analyzed_cases"])
     
     # Reorder columns for better display
-    column_order = ["filename", "case_name", "motion_outcome", "legal_basis", "expert_type", "one_sentence_summary"]
+    column_order = ["filename", "case_name", "motion_type", "motion_outcome", "legal_basis", "expert_type", "one_sentence_summary"]
     df = df[column_order]
     
     # Apply Filters from session state
@@ -265,11 +279,11 @@ if st.session_state["analyzed_cases"]:
     with col1:
         st.metric("Total Cases", len(df_filtered))
     with col2:
-        granted = len(df_filtered[df_filtered["motion_outcome"] == "Granted"])
-        st.metric("Motions Granted", granted)
+        admitted = len(df_filtered[df_filtered["motion_outcome"] == "Expert Admitted"])
+        st.metric("Experts Admitted", admitted)
     with col3:
-        denied = len(df_filtered[df_filtered["motion_outcome"] == "Denied"])
-        st.metric("Motions Denied", denied)
+        excluded = len(df_filtered[df_filtered["motion_outcome"] == "Expert Excluded"])
+        st.metric("Experts Excluded", excluded)
     
     st.divider()
     
@@ -346,12 +360,16 @@ if st.session_state["analyzed_cases"]:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "motion_outcome": st.column_config.TextColumn(
-                "Ruling",
-                help="Motion outcome: Granted, Denied, or Mixed"
-            ),
             "filename": st.column_config.TextColumn("Document"),
             "case_name": st.column_config.TextColumn("Case Name"),
+            "motion_type": st.column_config.TextColumn(
+                "Motion Type",
+                help="Offensive (Strike/Exclude) or Defensive (Motion for Leave)"
+            ),
+            "motion_outcome": st.column_config.TextColumn(
+                "Expert Status",
+                help="Expert Admitted, Expert Excluded, or Mixed"
+            ),
             "legal_basis": st.column_config.TextColumn("Legal Basis"),
             "expert_type": st.column_config.TextColumn("Expert Type"),
             "one_sentence_summary": st.column_config.TextColumn("Summary", width="large")
