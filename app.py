@@ -520,21 +520,28 @@ if prompt := st.chat_input("Ask me a question..."):
 
     # Generate Assistant response
     with st.chat_message("assistant"):
-        # Prepare messages with PDF context if available
+        # Prepare messages with structured case context if available
         messages_to_send = st.session_state.messages.copy()
         
-        if st.session_state["knowledge_base"]:
-            # Combine all PDF texts from knowledge base
-            combined_context = "System Context - Document Library:\n\n"
-            for filename, text in st.session_state["knowledge_base"].items():
-                combined_context += f"=== Document: {filename} ===\n{text}\n\n"
+        if st.session_state["analyzed_cases"]:
+            # Build Smart Context from structured data (95% token reduction)
+            smart_context = "System Context - Analyzed Cases Database:\n\n"
+            for case in st.session_state["analyzed_cases"]:
+                smart_context += f"CASE: {case.get('case_name', 'Unknown')}\n"
+                smart_context += f"TYPE: {case.get('motion_type', 'Unknown')}\n"
+                smart_context += f"STATUS: {case.get('motion_outcome', 'Unknown')} (Admitted/Excluded)\n"
+                smart_context += f"BASIS: {case.get('legal_basis', 'Unknown')}\n"
+                smart_context += f"EXPERT: {case.get('expert_type', 'Unknown')}\n"
+                smart_context += f"QUOTE: {case.get('key_quote', 'N/A')}\n"
+                smart_context += f"SUMMARY: {case.get('one_sentence_summary', 'N/A')}\n"
+                smart_context += "-------------------\n"
             
-            # Insert combined PDF context as system message after the initial system message
-            pdf_context_msg = {
+            # Insert structured context as system message after the initial system message
+            context_msg = {
                 "role": "system",
-                "content": combined_context
+                "content": smart_context
             }
-            messages_to_send.insert(1, pdf_context_msg)
+            messages_to_send.insert(1, context_msg)
         
         stream = client.chat.completions.create(
             model=st.session_state["model"],
