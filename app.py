@@ -174,7 +174,8 @@ if "analyzed_cases" not in st.session_state:
     st.session_state["analyzed_cases"] = []
 
 # 5. The User Interface
-st.title("⚖️ Judge Analytics Dashboard")
+st.title("⚖️ Know Your Judge: Expert Survival Analytics")
+st.caption("Strategic Intelligence: Will your expert testify before Judge Boyle?")
 
 # Sidebar for PDF Upload and Model Selection
 with st.sidebar:
