@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from pypdf import PdfReader
 import pandas as pd
 import json
+import altair as alt
 
 # 1. Load Environment Variables
 load_dotenv()
@@ -63,7 +64,9 @@ JSON STRUCTURE (Extract this information):
     "motion_type": "Offensive or Defensive",
     "motion_outcome": "Expert Admitted or Expert Excluded or Mixed",
     "legal_basis": "Reliability or Qualifications or Procedural or Relevance",
-    "one_sentence_summary": "One sentence summarizing the key holding"
+    "one_sentence_summary": "One sentence summarizing the key holding",
+    "key_quote": "Extract 1-2 verbatim sentences that explain WHY the judge ruled this way (the legal reasoning or procedural failure) AND the final ruling itself. Do not just extract the words 'Motion Granted'. Find the sentence that connects the reason to the result.",
+    "page_number": "The page number where this quote appears (based on the '--- PAGE X ---' markers)"
 }}
 
 Document text:
@@ -97,7 +100,9 @@ Respond ONLY with valid JSON matching the structure above. No additional text.""
             "motion_type": "Unknown",
             "motion_outcome": "Unknown",
             "legal_basis": "Unknown",
-            "one_sentence_summary": f"Error analyzing: {str(e)}"
+            "one_sentence_summary": f"Error analyzing: {str(e)}",
+            "key_quote": "N/A",
+            "page_number": "N/A"
         }
 
 def generate_judge_profile(cases_data):
@@ -197,8 +202,8 @@ with st.sidebar:
                 try:
                     pdf_reader = PdfReader(uploaded_file)
                     pdf_text = ""
-                    for page in pdf_reader.pages:
-                        pdf_text += page.extract_text()
+                    for i, page in enumerate(pdf_reader.pages):
+                        pdf_text += f"\n--- PAGE {i+1} ---\n" + page.extract_text()
                     
                     # Add to knowledge base
                     st.session_state["knowledge_base"][filename] = pdf_text
@@ -261,8 +266,11 @@ if st.session_state["analyzed_cases"]:
     # Convert to DataFrame
     df = pd.DataFrame(st.session_state["analyzed_cases"])
     
+    # Create citation column by combining key_quote and page_number
+    df['citation'] = '"' + df['key_quote'].astype(str) + '" (p. ' + df['page_number'].astype(str) + ')'
+    
     # Reorder columns for better display
-    column_order = ["filename", "case_name", "motion_type", "motion_outcome", "legal_basis", "expert_type", "one_sentence_summary"]
+    column_order = ["filename", "case_name", "motion_type", "motion_outcome", "legal_basis", "expert_type", "citation", "one_sentence_summary"]
     df = df[column_order]
     
     # Apply Filters from session state
@@ -290,42 +298,157 @@ if st.session_state["analyzed_cases"]:
     # Strategy Row: Win Rate by Expert Type & The Kill Zone
     st.subheader("🎯 Strategic Insights")
     
-    strategy_left, strategy_right = st.columns(2)
+    # Chart 1: Win Rate by Expert Type (Full Width)
+    st.markdown("**📊 Win Rate by Expert Type**")
+    st.caption("ℹ️ Labels indicate: Excluded / Total Challenges (Exclusion Rate %)")
     
-    with strategy_left:
-        st.markdown("**📊 Win Rate by Expert Type**")
+    if not df_filtered.empty:
+        # Group data by expert_type and motion_outcome
+        expert_chart_data = df_filtered.groupby(['expert_type', 'motion_outcome']).size().reset_index(name='count')
         
-        # Calculate win rate by expert type
-        if not df_filtered.empty:
-            expert_outcomes = df_filtered.groupby(['expert_type', 'motion_outcome']).size().unstack(fill_value=0)
+        if not expert_chart_data.empty:
+            # Prepare data for labeling - calculate exclusion rates
+            expert_stats = df_filtered.groupby('expert_type').agg(
+                total_count=('expert_type', 'size')
+            ).reset_index()
             
-            # Calculate percentages
-            if not expert_outcomes.empty:
-                # Display as stacked bar chart
-                st.bar_chart(expert_outcomes)
-            else:
-                st.info("No data available for current filters")
+            # Calculate excluded count for each expert type
+            excluded_df = df_filtered[df_filtered['motion_outcome'] == 'Expert Excluded'].groupby('expert_type').size().reset_index(name='excluded_count')
+            expert_stats = expert_stats.merge(excluded_df, on='expert_type', how='left')
+            expert_stats['excluded_count'] = expert_stats['excluded_count'].fillna(0).astype(int)
+            
+            # Calculate exclusion rate and create label text
+            expert_stats['exclusion_rate'] = (expert_stats['excluded_count'] / expert_stats['total_count'] * 100).round(1)
+            expert_stats['label_text'] = expert_stats.apply(
+                lambda row: f"{row['excluded_count']}/{row['total_count']} ({row['exclusion_rate']:.1f}%)" if row['total_count'] > 0 else "N/A",
+                axis=1
+            )
+            
+            # Calculate max count for X-axis domain padding
+            max_count = expert_stats['total_count'].max()
+            
+            # Layer 1: Horizontal stacked bar chart
+            bars = alt.Chart(expert_chart_data).mark_bar().encode(
+                y=alt.Y('expert_type:N', 
+                       title='Expert Type',
+                       sort=alt.EncodingSortField(field='count', op='sum', order='descending'),
+                       axis=alt.Axis(labels=True)),
+                x=alt.X('sum(count):Q', 
+                       title='Number of Cases',
+                       scale=alt.Scale(domain=[0, max_count * 1.3])),
+                color=alt.Color('motion_outcome:N', 
+                               title='Outcome',
+                               scale=alt.Scale(domain=['Expert Admitted', 'Expert Excluded', 'Mixed'],
+                                              range=['#1f77b4', '#d62728', '#ff7f0e'])),
+                tooltip=[
+                    alt.Tooltip('expert_type:N', title='Expert Type'),
+                    alt.Tooltip('motion_outcome:N', title='Outcome'),
+                    alt.Tooltip('count:Q', title='Count')
+                ]
+            )
+            
+            # Layer 2: Text labels on right side of bars
+            text = alt.Chart(expert_stats).mark_text(
+                align='left',
+                dx=5,
+                color='black',
+                fontWeight='bold',
+                fontSize=12
+            ).encode(
+                y=alt.Y('expert_type:N',
+                       sort=alt.EncodingSortField(field='total_count', order='descending')),
+                x=alt.X('total_count:Q'),
+                text='label_text:N'
+            )
+            
+            # Combine layers
+            expert_chart = alt.layer(bars, text).properties(
+                title='Win Rate by Expert Type',
+                height=500
+            )
+            
+            st.altair_chart(expert_chart, use_container_width=True)
         else:
             st.info("No data available for current filters")
+    else:
+        st.info("No data available for current filters")
     
-    with strategy_right:
-        st.markdown("**☠️ The Kill Zone (Legal Basis)**")
+    st.divider()
+    
+    # Chart 2: The Kill Zone (Full Width)
+    st.markdown("**☠️ The Kill Zone (Legal Basis)**")
+    st.caption("ℹ️ Labels indicate: Excluded / Total Challenges (Exclusion Rate %)")
+    
+    if not df_filtered.empty:
+        # Group data by legal_basis and motion_outcome
+        chart_data = df_filtered.groupby(['legal_basis', 'motion_outcome']).size().reset_index(name='count')
         
-        # Calculate legal basis distribution
-        if not df_filtered.empty:
-            legal_basis_counts = df_filtered["legal_basis"].value_counts()
+        if not chart_data.empty:
+            # Prepare data for labeling - calculate exclusion rates
+            basis_stats = df_filtered.groupby('legal_basis').agg(
+                total_count=('legal_basis', 'size')
+            ).reset_index()
             
-            # Create pie chart data
-            if not legal_basis_counts.empty:
-                # Display as text with percentages
-                total = legal_basis_counts.sum()
-                for basis, count in legal_basis_counts.items():
-                    percentage = (count / total) * 100
-                    st.metric(basis, f"{count} cases", f"{percentage:.1f}%")
-            else:
-                st.info("No data available for current filters")
+            # Calculate excluded count for each legal basis
+            excluded_df = df_filtered[df_filtered['motion_outcome'] == 'Expert Excluded'].groupby('legal_basis').size().reset_index(name='excluded_count')
+            basis_stats = basis_stats.merge(excluded_df, on='legal_basis', how='left')
+            basis_stats['excluded_count'] = basis_stats['excluded_count'].fillna(0).astype(int)
+            
+            # Calculate exclusion rate and create label text
+            basis_stats['exclusion_rate'] = (basis_stats['excluded_count'] / basis_stats['total_count'] * 100).round(1)
+            basis_stats['label_text'] = basis_stats.apply(
+                lambda row: f"{row['excluded_count']}/{row['total_count']} ({row['exclusion_rate']:.1f}%)" if row['total_count'] > 0 else "N/A",
+                axis=1
+            )
+            
+            # Calculate max count for X-axis domain padding
+            max_count = basis_stats['total_count'].max()
+            
+            # Layer 1: Horizontal stacked bar chart
+            bars = alt.Chart(chart_data).mark_bar().encode(
+                y=alt.Y('legal_basis:N', 
+                       title='Legal Basis',
+                       sort=alt.EncodingSortField(field='count', op='sum', order='descending'),
+                       axis=alt.Axis(labels=True)),
+                x=alt.X('sum(count):Q', 
+                       title='Number of Cases',
+                       scale=alt.Scale(domain=[0, max_count * 1.3])),
+                color=alt.Color('motion_outcome:N', 
+                               title='Outcome',
+                               scale=alt.Scale(domain=['Expert Admitted', 'Expert Excluded', 'Mixed'],
+                                              range=['#1f77b4', '#d62728', '#ff7f0e'])),
+                tooltip=[
+                    alt.Tooltip('legal_basis:N', title='Legal Basis'),
+                    alt.Tooltip('motion_outcome:N', title='Outcome'),
+                    alt.Tooltip('count:Q', title='Count')
+                ]
+            )
+            
+            # Layer 2: Text labels on right side of bars
+            text = alt.Chart(basis_stats).mark_text(
+                align='left',
+                dx=5,
+                color='black',
+                fontWeight='bold',
+                fontSize=12
+            ).encode(
+                y=alt.Y('legal_basis:N',
+                       sort=alt.EncodingSortField(field='total_count', order='descending')),
+                x=alt.X('total_count:Q'),
+                text='label_text:N'
+            )
+            
+            # Combine layers
+            chart = alt.layer(bars, text).properties(
+                title='Why Experts Get Challenged (Volume vs. Success)',
+                height=500
+            )
+            
+            st.altair_chart(chart, use_container_width=True)
         else:
             st.info("No data available for current filters")
+    else:
+        st.info("No data available for current filters")
     
     # Judge Scouting Report Section
     st.markdown("---")
@@ -372,6 +495,7 @@ if st.session_state["analyzed_cases"]:
             ),
             "legal_basis": st.column_config.TextColumn("Legal Basis"),
             "expert_type": st.column_config.TextColumn("Expert Type"),
+            "citation": st.column_config.TextColumn("Judge's Ruling (Source)", width="large"),
             "one_sentence_summary": st.column_config.TextColumn("Summary", width="large")
         }
     )
